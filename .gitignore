@@ -221,3 +221,17 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ---------------------------------------------------------------------------
+# py-template additions
+# ---------------------------------------------------------------------------
+# Tools installed locally (e.g. actionlint) and build outputs.
+/bin/
+# Local config; sample.env is the tracked reference.
+.env
+# The Postgres data directory is ignored by infra/postgres/.gitignore itself,
+# so the mount point stays tracked on a fresh clone.
+# IDEs
+.idea/
+.vscode/
+.DS_Store

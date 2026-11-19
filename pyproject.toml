@@ -1,0 +1,137 @@
+[project]
+name = "app-template"
+version = "0.1.0"
+description = "Layered Python HTTP service template: FastAPI, psycopg 3, structlog, Prometheus."
+requires-python = ">=3.15"
+# Exact pins: this is an application, not a library, so there is no range of
+# consumers to stay compatible with. uv.lock pins the transitive tree; `make
+# outdated` lists what has newer releases.
+dependencies = [
+    "fastapi==0.165.0",
+    "prometheus-client==0.26.0",
+    "psycopg-pool==3.3.3",
+    "psycopg[binary]==3.3.9",
+    "pydantic-settings==2.16.3",
+    "structlog==26.1.0",
+    "uvicorn==0.54.0",
+]
+
+[project.scripts]
+app-template = "app_template.main:main"
+
+[dependency-groups]
+dev = [
+    "httpx==0.28.1",
+    "mypy==2.4.1",
+    "pip-audit==2.10.1",
+    "pytest==9.2.0",
+    "pytest-asyncio==1.5.0",
+    "pytest-cov==7.1.0",
+    "ruff==0.17.5",
+]
+
+[build-system]
+requires = ["uv_build>=0.13.6,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv]
+required-version = ">=0.13.6"
+
+# ---------------------------------------------------------------------------
+# ruff — lint + format. Strict: everything on, then a short, justified opt-out
+# list. Adding to `ignore` needs a reason in the comment next to it.
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 120
+target-version = "py315"
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    # Docstrings are written where they explain a *why*, not on every symbol.
+    "D100", "D101", "D102", "D103", "D104", "D105", "D106", "D107",
+    # D203/D213 contradict D211/D212, which stay on.
+    "D203", "D213",
+    # Conflict with `ruff format` (the formatter owns these).
+    "COM812", "ISC001",
+    # No copyright headers in a template.
+    "CPY",
+    # The code style is imperative (docs/code_style.md): these rules push
+    # explicit loops and if-blocks towards comprehensions, any()/all() and
+    # ternaries — the opposite of what the project asks for.
+    "PERF401", "PERF403", "SIM108", "SIM110", "SIM111", "FURB118",
+    # Imports stay plain and eager. FastAPI and pydantic read annotations at
+    # runtime, so moving annotation-only imports under TYPE_CHECKING (or making
+    # them `lazy`) breaks them in ways the type checker cannot see.
+    "TC",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+    "S101",    # pytest is built on assert
+    "PLR2004", # literal expected values are the point of a test
+    "SLF001",  # tests may reach into module state (e.g. resetting memoized config)
+    "S105", "S106",  # throwaway credentials of the local/CI test database
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app_template", "tests"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"returns".msg = "Use app_template.utils.either: the returns library's bind/map pipelines contradict the imperative style."
+"logging.basicConfig".msg = "Logging is configured once in app_template.connectors.logger."
+
+[tool.ruff.format]
+quote-style = "double"
+
+# ---------------------------------------------------------------------------
+# mypy --strict over the application *and* the tests.
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.15"
+strict = true
+warn_unreachable = true
+enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool", "possibly-undefined"]
+plugins = ["pydantic.mypy"]
+files = ["src", "tests"]
+mypy_path = "src"
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true
+
+# ---------------------------------------------------------------------------
+# pytest / coverage
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "9.0"
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers", "--strict-config"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+asyncio_default_test_loop_scope = "function"
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+source = ["app_template"]
+branch = true
+
+[tool.coverage.report]
+# Modest floor, documented in CLAUDE.md ("CI"): it catches large untested
+# additions, not every untested line. Skipped DB tests are caught differently:
+# with TEST_PG_DSN set (make cover / CI) they fail instead of skipping.
+fail_under = 70
+show_missing = true
+skip_covered = false
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "\\.\\.\\.$",
+]
+
+[tool.coverage.xml]
+output = "coverage.xml"

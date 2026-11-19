@@ -1,0 +1,207 @@
+---
+name: checks
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+# Action versions are pinned to exact releases that run on Node 24; Node 20 is
+# deprecated on GitHub runners.
+#
+# The interpreter comes from .python-version: uv downloads that exact Python
+# on first use, so there is no separate setup-python step to keep in sync.
+#
+# Every job installs uv with its cache enabled; the cache key is derived from
+# uv.lock. Jobs start in parallel and race to save the same key — the losers
+# log "Failed to save: Unable to reserve cache ... another job may be creating
+# this cache", which is expected and harmless.
+
+# Least privilege: nothing here writes to the repository.
+permissions:
+  contents: read
+
+env:
+  # Mirrors UV_VERSION in the Makefile and the uv image tag in the Dockerfile.
+  UV_VERSION: 0.13.6
+  # `uv run` must never rewrite uv.lock in CI; a stale lock fails instead.
+  UV_FROZEN: "1"
+
+jobs:
+  format:
+    name: Format
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v7.0.1
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      - name: Install dependencies
+        run: make tools
+
+      - name: Check formatting
+        run: make check-format
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v7.0.1
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      - name: Install dependencies
+        run: make tools
+
+      # ruff check + mypy --strict over src/ and tests/.
+      - name: Run linters
+        run: make lint
+
+  vulncheck:
+    name: Vulncheck
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v7.0.1
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      - name: Install dependencies
+        run: make tools
+
+      - name: Run pip-audit
+        run: make vulncheck
+
+  test:
+    name: Test
+    runs-on: ubuntu-24.04
+    # Don't spend runner time on a tree with known vulnerable dependencies.
+    needs: vulncheck
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: master
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # The service container listens on 5432 on the runner (the 5434 host port
+      # is only the local side-by-side convention).
+      TEST_PG_DSN: postgresql://postgres:postgres@127.0.0.1:5432/master?sslmode=disable
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v7.0.1
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      - name: Install dependencies
+        run: make tools
+
+      - name: Build
+        run: make build
+
+      # `make cover` is test-integration plus coverage: with a service container
+      # present the database-backed tests must actually run, never silently
+      # skip, and the run fails under the coverage floor in pyproject.toml.
+      - name: Run tests with coverage
+        run: make cover
+
+      - name: Coverage summary
+        if: ${{ !cancelled() }}
+        run: |
+          total="$(uv run coverage report --format=total)"
+          {
+            echo "### Coverage"
+            echo ""
+            echo "Total: **${total}%** (floor: see \`fail_under\` in pyproject.toml)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: coverage
+          path: coverage.xml
+          if-no-files-found: error
+
+  docker:
+    name: Docker image
+    runs-on: ubuntu-24.04
+    # Catch a broken Dockerfile here instead of at deploy time. The image is
+    # built but never pushed.
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v7.0.1
+
+      - name: Setup buildx
+        uses: docker/setup-buildx-action@v4.4.1
+
+      - name: Build image
+        uses: docker/build-push-action@v7.4.0
+        with:
+          context: .
+          push: false
+          load: true
+          build-args: |
+            COMMIT=${{ github.sha }}
+          tags: py-template:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify the entrypoint is in the image
+        run: docker run --rm --entrypoint ls py-template:ci -l /app/.venv/bin/app-template
+
+      # /health needs no database, but the app refuses to start without one —
+      # so the smoke test brings up Postgres on a private network first.
+      - name: Smoke-test /health
+        run: |
+          docker network create smoke
+          docker run -d --name smoke-pg --network smoke \
+            -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=master \
+            postgres:17-alpine
+          until docker exec smoke-pg pg_isready -U postgres -d master >/dev/null 2>&1; do sleep 1; done
+          docker run -d --name smoke-app --network smoke -p 8080:8080 \
+            -e APP_NAME=py-template -e ENV=ci \
+            -e PG_HOST=smoke-pg -e PG_PORT=5432 -e PG_USERNAME=postgres \
+            -e PG_PASSWORD=postgres -e PG_DATABASE=master \
+            py-template:ci
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/health; then
+              echo
+              curl -fsS http://127.0.0.1:8080/metrics | grep py_template_metric_build_info_total
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs smoke-app
+          exit 1
+
+      - name: Container logs
+        if: ${{ failure() }}
+        run: docker logs smoke-app || true

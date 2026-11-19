@@ -1,0 +1,92 @@
+# Keep container logs from filling the disk on a long-running local stack.
+x-logging: &default-logging
+  options:
+    max-size: "50m"
+    max-file: "10"
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    hostname: postgres
+    container_name: py_template_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-postgres}
+      POSTGRES_USER: ${PG_USERNAME:-postgres}
+      POSTGRES_DB: ${PG_DATABASE:-master}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      # 5434 on the host so the go/rust/py/ts templates can run side by side.
+      - "${PG_PORT:-5434}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USERNAME:-postgres} -d ${PG_DATABASE:-master}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    volumes:
+      # Bind mount, not a named volume: the data is visible in the working tree
+      # at infra/postgres/ and is removed with the directory. PGDATA points at a
+      # subdirectory so Postgres creates it itself with the ownership it needs —
+      # initdb refuses a data directory it does not own.
+      - ./infra/postgres:/var/lib/postgresql/data
+    networks:
+      - backend
+    logging: *default-logging
+
+  service:
+    image: py-template:stable
+    container_name: py_template_service
+    build:
+      context: ./
+      args:
+        COMMIT: ${COMMIT:-unknown}
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # No .env inside the image (.dockerignore): config comes from here.
+      - READ_ENV_FROM_SHELL=true
+      # .env points PG_HOST at 127.0.0.1 for host-side tooling (migrations, psql).
+      # Inside the network that would be the service's own container, so it is
+      # overridden with the compose service name here.
+      - PG_HOST=postgres
+      - PG_PORT=5432
+      - PORT=8080
+    ports:
+      - "${PORT:-8082}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Must exceed the app's own drain budget (DEFAULT_SHUTDOWN_TIMEOUT_S, 15s)
+    # plus closing the pool, or Docker SIGKILLs the container mid-drain and the
+    # graceful shutdown never gets to finish (exit 137 instead of 0).
+    stop_grace_period: 30s
+    healthcheck:
+      # The slim image has no curl/wget; the interpreter is already there.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    networks:
+      - backend
+    logging: *default-logging
+
+  # One-shot tool, never started by `docker compose up`: the Makefile's migrate*
+  # targets run it with `docker compose run --rm migrate ...`. Same migrate
+  # binary as go-template, without installing it on the host.
+  migrate:
+    image: migrate/migrate:v4.20.1
+    profiles: ["tools"]
+    volumes:
+      - ./db/migrations:/migrations
+    networks:
+      - backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+networks:
+  backend:
+    driver: bridge

@@ -1,0 +1,22 @@
+.git
+.github
+.idea
+.vscode
+.venv
+.mypy_cache
+.ruff_cache
+.pytest_cache
+**/__pycache__
+bin
+dist
+build
+# Local Postgres data — megabytes of runtime state, never part of a build.
+infra
+.env
+.env.*
+*.md
+docs
+tests
+.coverage
+coverage.xml
+htmlcov
